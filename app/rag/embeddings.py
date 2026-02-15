@@ -1,41 +1,68 @@
 """
-OpenAI embeddings helper.
-Uses text-embedding-3-small (1536 dims, low cost).
+Local embeddings helper using sentence-transformers.
+Uses all-MiniLM-L6-v2 (384 dims, runs locally, no API key needed).
+
+Drop-in replacement for the previous OpenAI embeddings module —
+embed_text() and embed_batch() signatures are identical.
 """
 from __future__ import annotations
 
-from openai import AsyncOpenAI
+import asyncio
+import logging
+from functools import lru_cache
 
-from app.config import settings
-from app.utils.logger import get_logger
+from sentence_transformers import SentenceTransformer
 
-logger = get_logger(__name__)
+# Use stdlib logging directly — sentence_transformers internally calls
+# logger.name which custom PrintLogger objects don't implement.
+logger = logging.getLogger(__name__)
 
-_client: AsyncOpenAI | None = None
+# Embedding dimension for all-MiniLM-L6-v2
+# Update your vector store index to match if you're migrating from OpenAI (1536 → 384)
+EMBEDDING_DIM = 384
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
-def get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    return _client
+@lru_cache(maxsize=1)
+def _get_model() -> SentenceTransformer:
+    """
+    Load the model once and cache it for the lifetime of the process.
+    Thread-safe due to lru_cache + GIL for model loading.
+    """
+    logger.info(f"Loading embedding model: {MODEL_NAME}")
+    model = SentenceTransformer(MODEL_NAME)
+    logger.info(f"Embedding model loaded (dim={EMBEDDING_DIM})")
+    return model
 
 
 async def embed_text(text: str) -> list[float]:
-    """Embed a single text string."""
-    client = get_client()
-    response = await client.embeddings.create(
-        model=settings.OPENAI_EMBEDDING_MODEL,
-        input=text.replace("\n", " "),
+    """
+    Embed a single text string.
+    Runs the CPU-bound encoding in a thread pool to keep the event loop free.
+    """
+    cleaned = text.replace("\n", " ").strip()
+    loop = asyncio.get_event_loop()
+    embedding = await loop.run_in_executor(
+        None,  # uses default ThreadPoolExecutor
+        lambda: _get_model().encode(cleaned, normalize_embeddings=True).tolist()
     )
-    return response.data[0].embedding
+    return embedding
 
 
 async def embed_batch(texts: list[str]) -> list[list[float]]:
-    """Embed multiple texts in a single API call (up to 2048 inputs)."""
-    client = get_client()
-    response = await client.embeddings.create(
-        model=settings.OPENAI_EMBEDDING_MODEL,
-        input=[t.replace("\n", " ") for t in texts],
+    """
+    Embed multiple texts in a single encoding call.
+    Order of returned embeddings matches order of input texts.
+    """
+    cleaned = [t.replace("\n", " ").strip() for t in texts]
+    loop = asyncio.get_event_loop()
+    embeddings = await loop.run_in_executor(
+        None,
+        lambda: _get_model().encode(
+            cleaned,
+            normalize_embeddings=True,
+            batch_size=64,        # tune based on available RAM
+            show_progress_bar=False,
+        ).tolist()
     )
-    return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
+    return embeddings
