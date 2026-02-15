@@ -19,9 +19,10 @@ from app.routers.auth import router as auth_router
 from app.routers.insights import router as insights_router
 from app.routers.responses import responses_admin_router, router as responses_router
 from app.routers.surveys import router as surveys_router
-from app.utils.logger import get_logger
+# from app.utils.logger import get_logger
+import logging
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -37,10 +38,9 @@ async def lifespan(app: FastAPI):
     # Initialize Pinecone indexes
     try:
         from app.rag.pinecone_client import ensure_indexes
-        ensure_indexes()
+        ensure_indexes()  # ✅ no arguments needed
         logger.info("startup.pinecone_ready")
 
-        # Seed knowledge base (idempotent)
         from app.rag.knowledge_base import seed_knowledge_base
         await seed_knowledge_base()
         logger.info("startup.knowledge_base_seeded")

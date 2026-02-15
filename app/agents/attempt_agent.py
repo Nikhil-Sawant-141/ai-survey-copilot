@@ -7,6 +7,7 @@ tracks progress, generates completion summaries, and manages session state.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 
@@ -15,9 +16,9 @@ from openai import AsyncOpenAI
 from app.config import settings
 from app.redis_client import cache_get, cache_set, get_session, set_session
 from app.schemas import ClarificationResult, CompletionSummary, ProgressMessage
-from app.utils.logger import get_logger
+# from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 

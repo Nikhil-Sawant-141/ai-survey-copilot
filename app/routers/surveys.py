@@ -12,6 +12,7 @@ POST   /surveys/{id}/close   Close survey (triggers insight generation)
 DELETE /surveys/{id}         Delete draft survey
 """
 from datetime import datetime
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,7 +28,7 @@ from app.tasks.celery_app import generate_survey_insights
 from app.utils.logger import get_logger
 
 router = APIRouter(prefix="/surveys", tags=["surveys"])
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=SurveyResponse, status_code=201)

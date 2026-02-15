@@ -6,6 +6,7 @@ correct specialized agent, logs all interactions for auditing.
 """
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Any
@@ -28,7 +29,7 @@ from app.schemas import (
 )
 from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class AgentOrchestrator:

@@ -8,11 +8,12 @@ Handles:
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # ─── PHI patterns (supplement Presidio for healthcare-specific items) ─────────
 

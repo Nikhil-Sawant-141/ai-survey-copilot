@@ -8,6 +8,7 @@ Task queues:
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timedelta
 
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # ─── App ──────────────────────────────────────────────────────────────────────
 

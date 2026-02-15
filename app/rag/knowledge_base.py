@@ -15,9 +15,9 @@ import uuid
 from app.config import settings
 from app.rag.embeddings import embed_batch, embed_text
 from app.rag.pinecone_client import query_index, upsert_vectors
-from app.utils.logger import get_logger
+import logging
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # ─── Static knowledge: survey best practices ──────────────────────────────────
 # In production, load these from a database or document store.
@@ -151,7 +151,7 @@ async def seed_knowledge_base() -> None:
     Embed all guidelines and upsert to Pinecone.
     Safe to run multiple times (upsert is idempotent).
     """
-    logger.info("knowledge_base.seeding", count=len(SURVEY_GUIDELINES))
+    logger.info(f"knowledge_base.seeding count={len(SURVEY_GUIDELINES)}")
 
     texts = [f"{g['title']}. {g['content']}" for g in SURVEY_GUIDELINES]
     embeddings = await embed_batch(texts)
@@ -170,7 +170,7 @@ async def seed_knowledge_base() -> None:
     ]
 
     await upsert_vectors(settings.PINECONE_INDEX_GUIDELINES, vectors)
-    logger.info("knowledge_base.seeded", count=len(vectors))
+    logger.info(f"knowledge_base.seeded count={len(vectors)}")
 
 
 async def retrieve_guidelines(query: str, top_k: int = 4) -> str:
@@ -222,9 +222,8 @@ async def index_survey_template(survey: dict, completion_rate: float) -> None:
 
     await upsert_vectors(settings.PINECONE_INDEX_TEMPLATES, [vector])
     logger.info(
-        "knowledge_base.template_indexed",
-        survey_id=survey.get("id"),
-        completion_rate=completion_rate,
+        f"knowledge_base.template_indexed survey_id={survey.get('id')} "
+        f"completion_rate={completion_rate}"
     )
 
 

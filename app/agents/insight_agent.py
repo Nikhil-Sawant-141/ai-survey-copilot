@@ -8,6 +8,7 @@ Designed to run asynchronously after surveys close.
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from openai import AsyncOpenAI
@@ -16,7 +17,7 @@ from app.config import settings
 from app.schemas import ActionItem, InsightResult, Theme
 from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 

@@ -16,6 +16,7 @@ DOCTOR endpoints:
   POST /agents/save-progress           Save partial answers
   GET  /agents/restore/{session_id}    Restore in-progress session
 """
+import logging
 import uuid
 from uuid import UUID
 
@@ -37,7 +38,7 @@ from app.schemas import (
 from app.utils.logger import get_logger
 
 router = APIRouter(prefix="/agents", tags=["agents"])
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 # ─── Admin Agent Endpoints ────────────────────────────────────────────────────

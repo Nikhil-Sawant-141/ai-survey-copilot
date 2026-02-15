@@ -6,6 +6,7 @@ GET  /responses/{id}      Get response status
 GET  /surveys/{id}/responses  Admin: list all responses for a survey
 """
 from datetime import datetime
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,8 +22,7 @@ from app.tasks.celery_app import send_completion_reminder
 from app.utils.logger import get_logger
 
 router = APIRouter(prefix="/responses", tags=["responses"])
-logger = get_logger(__name__)
-
+logger = logging.getLogger(__name__)
 
 @router.post("", response_model=ResponseOut, status_code=201)
 async def submit_response(
