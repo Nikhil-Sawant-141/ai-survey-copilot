@@ -36,6 +36,11 @@ async def delete_session(session_id: str) -> None:
     r = get_redis()
     await r.delete(f"session:{session_id}")
 
+async def close_redis():
+    global _redis
+    if _redis is not None:
+        await _redis.aclose()
+        _redis = None
 
 # ─── Rate limiter ─────────────────────────────────────────────────────────────
 
