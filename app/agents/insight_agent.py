@@ -200,12 +200,19 @@ Focus on actionable findings. Paraphrase quotes — never include identifiable i
     # ─── Private helpers ──────────────────────────────────────────────────────
 
     def _extract_open_responses(self, responses: list[dict]) -> list[str]:
-        """Pull all text-type answers into a flat list."""
+        """Pull all text-type answers into a flat list.
+
+        answers is a dict of {question_id: value}, not a list —
+        iterate over .values() to get the actual answer values.
+        """
         texts = []
         for r in responses:
-            for answer in r.get("answers", []):
-                if isinstance(answer.get("value"), str) and len(answer["value"]) > 10:
-                    texts.append(answer["value"])
+            answers = r.get("answers", {})
+            if not isinstance(answers, dict):
+                continue
+            for value in answers.values():
+                if isinstance(value, str) and len(value) > 10:
+                    texts.append(value)
         return texts
 
     def _summarize_quantitative(
