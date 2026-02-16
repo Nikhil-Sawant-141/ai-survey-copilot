@@ -19,14 +19,13 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
 
-    # ── OpenAI ───────────────────────────────────────────────────────────────
-    OPENAI_API_KEY: str = ""
-    OPENAI_LLM_MODEL: str = "gpt-4o"
-    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # ── Anthropic ─────────────────────────────────────────────────────────────
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-5-20250929"
 
     # ── Pinecone ─────────────────────────────────────────────────────────────
     PINECONE_API_KEY: str = ""
-    PINECONE_ENVIRONMENT: str = "us-east-1-aws"
+    PINECONE_ENVIRONMENT: str = "us-east-1"
     PINECONE_INDEX_GUIDELINES: str = "survey-guidelines"
     PINECONE_INDEX_TEMPLATES: str = "survey-templates"
 

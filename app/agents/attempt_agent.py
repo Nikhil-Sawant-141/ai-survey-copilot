@@ -3,51 +3,47 @@ Attempt Agent
 ─────────────
 Doctor-facing agent. Explains confusing questions (without changing meaning),
 tracks progress, generates completion summaries, and manages session state.
+Uses Anthropic tool calling for structured output.
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
-import uuid
 
-from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 
 from app.config import settings
 from app.redis_client import cache_get, cache_set, get_session, set_session
 from app.schemas import ClarificationResult, CompletionSummary, ProgressMessage
-# from app.utils.logger import get_logger
 
 logger = logging.getLogger(__name__)
 
-client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
-# ─── Tool schema ──────────────────────────────────────────────────────────────
+# ─── Tool schema (Anthropic format) ───────────────────────────────────────────
 
 CLARIFICATION_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "clarification_result",
-        "description": "Returns a plain-English clarification for a survey question",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "clarification": {
-                    "type": "string",
-                    "description": "Clear explanation of what the question is asking (2-3 sentences max)",
-                },
-                "examples": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "1-2 anonymized example responses to help the doctor understand",
-                },
-                "did_change_meaning": {
-                    "type": "boolean",
-                    "description": "Safety flag – MUST always be false. Clarification must not change question intent.",
-                },
+    "name": "clarification_result",
+    "description": "Returns a plain-English clarification for a survey question",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "clarification": {
+                "type": "string",
+                "description": "Clear explanation of what the question is asking (2-3 sentences max)",
             },
-            "required": ["clarification", "did_change_meaning"],
+            "examples": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "1-2 anonymized example responses to help the doctor understand",
+            },
+            "did_change_meaning": {
+                "type": "boolean",
+                "description": "Safety flag — MUST always be false. Clarification must not change question intent.",
+            },
         },
+        "required": ["clarification", "did_change_meaning"],
     },
 }
 
@@ -84,13 +80,6 @@ FORBIDDEN RESPONSES:
 - "Based on your symptoms..." (medical advice)
 - "You should select option X because..." (influencing answer)
 - "This question is poorly worded..." (criticizing the survey)
-
-GOOD RESPONSE PATTERN:
-Question: "What is your NPS for the current EHR workflow?"
-Clarification: "This asks how likely you are to recommend the current EHR workflow to a colleague, 
-on a scale of 0 (not at all) to 10 (extremely likely). Focus on your overall experience, 
-not any single feature."
-Examples: ["I'd give it a 7 because it handles scheduling well", "I'd rate it 4 due to frequent slowdowns"]
 """
 
     async def clarify_question(
@@ -106,58 +95,50 @@ Examples: ["I'd give it a 7 because it handles scheduling well", "I'd rate it 4 
         cache_key = f"clarification:{hash(question.get('text', ''))}"
         cached = await cache_get(cache_key)
         if cached:
-            logger.info("attempt_agent.clarify_question.cache_hit", question_id=question.get("id"))
+            logger.info(f"attempt_agent.clarify_question.cache_hit question_id={question.get('id')}")
             return ClarificationResult(**cached)
 
         specialty = (doctor_context or {}).get("specialty", "General")
         experience = (doctor_context or {}).get("years_experience", "unknown")
 
-        prompt = f"""A doctor needs help understanding this survey question.
+        response = await client.messages.create(
+            model=settings.ANTHROPIC_MODEL,
+            max_tokens=512,
+            system=self.SYSTEM_PROMPT,
+            tools=[CLARIFICATION_TOOL],
+            tool_choice={"type": "tool", "name": "clarification_result"},
+            messages=[{
+                "role": "user",
+                "content": f"""A doctor needs help understanding this survey question.
 
 Doctor context: {specialty} specialty, {experience} years experience
 
 Question to clarify:
 {json.dumps(question, indent=2)}
 
-Provide a clarification using the clarification_result function.
-Remember: explain the question, do NOT suggest an answer."""
-
-        response = await client.chat.completions.create(
-            model=settings.OPENAI_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            tools=[CLARIFICATION_TOOL],
-            tool_choice={"type": "function", "function": {"name": "clarification_result"}},
-            temperature=0.3,
+Provide a clarification using the clarification_result tool.
+Remember: explain the question, do NOT suggest an answer.""",
+            }],
         )
 
         latency_ms = int((time.monotonic() - t0) * 1000)
-        tool_call = response.choices[0].message.tool_calls[0]
-        data = json.loads(tool_call.function.arguments)
+
+        # Anthropic: find tool_use block, .input is already a dict
+        tool_use = next(b for b in response.content if b.type == "tool_use")
+        data = tool_use.input
 
         # Safety assertion — clarification must never change meaning
         if data.get("did_change_meaning"):
-            logger.warning(
-                "attempt_agent.clarify_question.meaning_changed",
-                question_id=question.get("id"),
-            )
+            logger.warning(f"attempt_agent.clarify_question.meaning_changed question_id={question.get('id')}")
             data["did_change_meaning"] = False
 
-        result = ClarificationResult(
-            question_id=question.get("id", ""),
-            **data,
-        )
+        result = ClarificationResult(question_id=question.get("id", ""), **data)
 
         # Cache for 24h
         await cache_set(cache_key, result.model_dump(), ttl=86400)
-
         logger.info(
-            "attempt_agent.clarify_question",
-            session_id=session_id,
-            question_id=question.get("id"),
-            latency_ms=latency_ms,
+            f"attempt_agent.clarify_question session_id={session_id} "
+            f"question_id={question.get('id')} latency_ms={latency_ms}"
         )
         return result
 
@@ -173,7 +154,6 @@ Remember: explain the question, do NOT suggest an answer."""
         estimated_seconds_remaining = int(remaining_questions * avg_seconds_per_question)
         percent_complete = round((questions_answered / questions_total) * 100, 1)
 
-        # Choose motivational message based on progress tier
         if percent_complete == 0:
             message = f"This survey takes about {int(questions_total * avg_seconds_per_question / 60)} min. Let's go!"
         elif percent_complete < 33:
@@ -200,14 +180,20 @@ Remember: explain the question, do NOT suggest an answer."""
         total_responses: int,
     ) -> CompletionSummary:
         """Generate a personalized thank-you + aggregate insight after completion."""
-        prompt = f"""A doctor just completed a survey. Generate a brief, warm thank-you message.
+        response = await client.messages.create(
+            model=settings.ANTHROPIC_MODEL,
+            max_tokens=512,
+            system=self.SYSTEM_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"""A doctor just completed a survey. Generate a brief, warm thank-you message.
 
 Survey: {survey_title}
 Total responses from all doctors so far: {total_responses}
 This doctor's responses:
 {json.dumps(responses, indent=2)}
 
-Return JSON with:
+Return ONLY a JSON object (no markdown fences):
 {{
   "thank_you_message": "Warm 1-sentence thank you personalized to the survey topic",
   "aggregate_insight": "1 sentence about what collective responses are showing (make it feel impactful)",
@@ -217,19 +203,14 @@ Return JSON with:
 Rules:
 - No medical advice
 - Keep it under 3 sentences total
-- Make the doctor feel their input mattered"""
-
-        response = await client.chat.completions.create(
-            model=settings.OPENAI_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.6,
+- Make the doctor feel their input mattered""",
+            }],
         )
 
-        data = json.loads(response.choices[0].message.content)
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1].lstrip("json").strip()
+        data = json.loads(text)
         return CompletionSummary(**data)
 
     # ─── Session management ───────────────────────────────────────────────────
@@ -239,24 +220,21 @@ Rules:
     ) -> None:
         """Persist partial answers to Redis so doctor can resume later."""
         session = await get_session(session_id) or {}
-        session.update(
-            {
-                "survey_id": survey_id,
-                "answers": answers,
-                "last_saved": time.time(),
-            }
-        )
+        session.update({
+            "survey_id": survey_id,
+            "answers": answers,
+            "last_saved": time.time(),
+        })
         await set_session(session_id, session, ttl=604800)  # 7 days
-        logger.info("attempt_agent.save_progress", session_id=session_id, answers_count=len(answers))
+        logger.info(f"attempt_agent.save_progress session_id={session_id} answers_count={len(answers)}")
 
     async def restore_session(self, session_id: str) -> dict | None:
         """Restore doctor's in-progress answers from Redis."""
         session = await get_session(session_id)
         if session:
             logger.info(
-                "attempt_agent.restore_session",
-                session_id=session_id,
-                answers_count=len(session.get("answers", {})),
+                f"attempt_agent.restore_session session_id={session_id} "
+                f"answers_count={len(session.get('answers', {}))}"
             )
         return session
 

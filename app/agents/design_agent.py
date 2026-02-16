@@ -3,170 +3,143 @@ Design Agent
 ─────────────
 Helps admins craft high-quality surveys: bias detection, clarity checks,
 question-type recommendations, length optimization, and A/B variant generation.
-Uses OpenAI function calling for structured output.
+Uses Anthropic tool calling for structured output.
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
-import uuid
-from typing import Any
 
-from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 
 from app.config import settings
 from app.rag.knowledge_base import retrieve_guidelines
 from app.schemas import (
-    BiasFlag,
     GenerateVariantsResult,
     QualityCheckResult,
-    Question,
-    QuestionType,
-    VariantSurvey,
 )
-from app.utils.logger import get_logger
 
 logger = logging.getLogger(__name__)
 
-client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
-# ─── Tool schemas (OpenAI function calling) ───────────────────────────────────
+# ─── Tool schemas (Anthropic format) ──────────────────────────────────────────
+# Key differences from OpenAI:
+#   - No outer {"type": "function", "function": {...}} wrapper — tools are flat
+#   - "input_schema" instead of "parameters"
+#   - tool_choice is {"type": "tool", "name": "..."} not {"type": "function", ...}
+#   - Response: find block with type=="tool_use" in response.content; .input is already a dict
 
 QUALITY_CHECK_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "quality_check_result",
-        "description": "Returns quality analysis of a survey",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "overall_quality_score": {
-                    "type": "number",
-                    "description": "Survey quality 0-10",
-                },
-                "estimated_completion_rate": {
-                    "type": "number",
-                    "description": "Predicted % of doctors who will complete",
-                },
-                "estimated_time_seconds": {
-                    "type": "integer",
-                    "description": "Estimated time to complete in seconds",
-                },
-                "bias_flags": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "question_id": {"type": "string"},
-                            "bias_type": {
-                                "type": "string",
-                                "enum": [
-                                    "leading_question",
-                                    "loaded_term",
-                                    "false_dichotomy",
-                                    "double_barreled",
-                                    "ambiguous",
-                                    "jargon_heavy",
-                                ],
-                            },
-                            "severity": {"type": "string", "enum": ["low", "medium", "high"]},
-                            "original_text": {"type": "string"},
-                            "suggestion": {"type": "string"},
-                            "explanation": {"type": "string"},
-                        },
-                        "required": [
-                            "question_id",
-                            "bias_type",
-                            "severity",
-                            "original_text",
-                            "suggestion",
-                            "explanation",
-                        ],
-                    },
-                },
-                "clarity_issues": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "question_id": {"type": "string"},
-                            "issue": {"type": "string"},
-                            "suggestion": {"type": "string"},
-                        },
-                    },
-                },
-                "length_recommendation": {"type": "string"},
-                "audience_suggestion": {"type": "string"},
+    "name": "quality_check_result",
+    "description": "Returns quality analysis of a survey",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "overall_quality_score": {
+                "type": "number",
+                "description": "Survey quality 0-10",
             },
-            "required": [
-                "overall_quality_score",
-                "estimated_completion_rate",
-                "estimated_time_seconds",
-                "bias_flags",
-                "clarity_issues",
-                "length_recommendation",
-            ],
+            "estimated_completion_rate": {
+                "type": "number",
+                "description": "Predicted % of doctors who will complete",
+            },
+            "estimated_time_seconds": {
+                "type": "integer",
+                "description": "Estimated time to complete in seconds",
+            },
+            "bias_flags": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question_id": {"type": "string"},
+                        "bias_type": {
+                            "type": "string",
+                            "enum": [
+                                "leading_question",
+                                "loaded_term",
+                                "false_dichotomy",
+                                "double_barreled",
+                                "ambiguous",
+                                "jargon_heavy",
+                            ],
+                        },
+                        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                        "original_text": {"type": "string"},
+                        "suggestion": {"type": "string"},
+                        "explanation": {"type": "string"},
+                    },
+                    "required": [
+                        "question_id", "bias_type", "severity",
+                        "original_text", "suggestion", "explanation",
+                    ],
+                },
+            },
+            "clarity_issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question_id": {"type": "string"},
+                        "issue": {"type": "string"},
+                        "suggestion": {"type": "string"},
+                    },
+                },
+            },
+            "length_recommendation": {"type": "string"},
+            "audience_suggestion": {"type": "string"},
         },
+        "required": [
+            "overall_quality_score", "estimated_completion_rate",
+            "estimated_time_seconds", "bias_flags",
+            "clarity_issues", "length_recommendation",
+        ],
     },
 }
 
 GENERATE_VARIANTS_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "generate_variants_result",
-        "description": "Returns A/B survey variants",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "variants": {
-                    "type": "array",
-                    "minItems": 2,
-                    "maxItems": 3,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "variant_label": {"type": "string"},
-                            "questions": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "id": {"type": "string"},
-                                        "text": {"type": "string"},
-                                        "type": {
-                                            "type": "string",
-                                            "enum": ["mcq", "likert", "text", "boolean", "ranking"],
-                                        },
-                                        "options": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                            "nullable": True,
-                                        },
-                                        "required": {"type": "boolean"},
+    "name": "generate_variants_result",
+    "description": "Returns A/B survey variants",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "variants": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "variant_label": {"type": "string"},
+                        "questions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "text": {"type": "string"},
+                                    "type": {
+                                        "type": "string",
+                                        "enum": ["mcq", "likert", "text", "boolean", "ranking"],
                                     },
-                                    "required": ["id", "text", "type", "required"],
+                                    "options": {"type": "array", "items": {"type": "string"}},
+                                    "required": {"type": "boolean"},
                                 },
-                            },
-                            "hypothesis": {"type": "string"},
-                            "predicted_completion_rate": {"type": "number"},
-                            "key_differences": {
-                                "type": "array",
-                                "items": {"type": "string"},
+                                "required": ["id", "text", "type", "required"],
                             },
                         },
-                        "required": [
-                            "variant_label",
-                            "questions",
-                            "hypothesis",
-                            "predicted_completion_rate",
-                            "key_differences",
-                        ],
+                        "hypothesis": {"type": "string"},
+                        "predicted_completion_rate": {"type": "number"},
+                        "key_differences": {"type": "array", "items": {"type": "string"}},
                     },
-                }
-            },
-            "required": ["variants"],
+                    "required": [
+                        "variant_label", "questions", "hypothesis",
+                        "predicted_completion_rate", "key_differences",
+                    ],
+                },
+            }
         },
+        "required": ["variants"],
     },
 }
 
@@ -181,8 +154,9 @@ class DesignAgent:
     Methods
     -------
     quality_check(survey_title, questions, specialty) → QualityCheckResult
-    improve_question(question) → Question
+    improve_question(question) → dict
     generate_variants(title, questions, num_variants) → GenerateVariantsResult
+    suggest_question_types(survey_goal) → list[dict]
     """
 
     SYSTEM_PROMPT = """You are an expert survey methodologist helping healthcare platform
@@ -209,7 +183,6 @@ MANDATORY RULES:
 - NEVER suggest collecting PHI (names, DOB, SSN, MRN, diagnosis, medications)
 - Keep surveys under 10 questions for busy doctors
 - Suggested completion time MUST be ≤ 3 minutes (180 seconds)
-- All function outputs must be complete and valid JSON
 """
 
     async def quality_check(
@@ -221,11 +194,17 @@ MANDATORY RULES:
     ) -> QualityCheckResult:
         """Run full quality check on a survey."""
         t0 = time.monotonic()
-
-        # Retrieve relevant best-practice guidelines from RAG
         guidelines = await retrieve_guidelines(survey_title)
 
-        prompt = f"""Analyze this survey for quality, bias, and clarity.
+        response = await client.messages.create(
+            model=settings.ANTHROPIC_MODEL,
+            max_tokens=4096,
+            system=self.SYSTEM_PROMPT,
+            tools=[QUALITY_CHECK_TOOL],
+            tool_choice={"type": "tool", "name": "quality_check_result"},
+            messages=[{
+                "role": "user",
+                "content": f"""Analyze this survey for quality, bias, and clarity.
 
 Survey Title: {survey_title}
 Target Specialty: {specialty or "All specialties"}
@@ -235,38 +214,30 @@ Questions:
 Relevant Platform Guidelines:
 {guidelines}
 
-Run a comprehensive quality check using the quality_check_result function."""
-
-        response = await client.chat.completions.create(
-            model=settings.OPENAI_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            tools=[QUALITY_CHECK_TOOL],
-            tool_choice={"type": "function", "function": {"name": "quality_check_result"}},
-            temperature=0.2,
+Run a comprehensive quality check using the quality_check_result tool.""",
+            }],
         )
 
         latency_ms = int((time.monotonic() - t0) * 1000)
-        tool_call = response.choices[0].message.tool_calls[0]
-        data = json.loads(tool_call.function.arguments)
+        # Anthropic: find the tool_use block and read .input (already a dict)
+        tool_use = next(b for b in response.content if b.type == "tool_use")
+        data = tool_use.input
 
         logger.info(
-            "design_agent.quality_check",
-            survey_title=survey_title,
-            latency_ms=latency_ms,
-            tokens=response.usage.total_tokens,
-            score=data.get("overall_quality_score"),
-            bias_count=len(data.get("bias_flags", [])),
+            f"design_agent.quality_check survey={survey_title} latency_ms={latency_ms} "
+            f"score={data.get('overall_quality_score')} bias_count={len(data.get('bias_flags', []))}"
         )
-
         return QualityCheckResult(**data)
 
     async def improve_question(self, question: dict) -> dict:
         """Return an improved version of a single question."""
-        prompt = f"""Improve this survey question for clarity, neutrality, and mobile-friendliness.
-Return ONLY a JSON object matching the Question schema (same fields as input).
+        response = await client.messages.create(
+            model=settings.ANTHROPIC_MODEL,
+            max_tokens=1024,
+            system=self.SYSTEM_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"""Improve this survey question for clarity, neutrality, and mobile-friendliness.
 
 Original question:
 {json.dumps(question, indent=2)}
@@ -275,20 +246,17 @@ Improvements to apply:
 - Remove bias or leading language
 - Simplify wording (reading level ≤ grade 8)
 - If MCQ: ensure options are complete, mutually exclusive, balanced
-- Add a brief 'hint' field (1 sentence) the doctor can reveal if confused"""
+- Add a brief 'hint' field (1 sentence) the doctor can reveal if confused
 
-        response = await client.chat.completions.create(
-            model=settings.OPENAI_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.3,
+Respond with ONLY a JSON object (no markdown fences).""",
+            }],
         )
 
-        improved = json.loads(response.choices[0].message.content)
-        logger.info("design_agent.improve_question", question_id=question.get("id"))
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1].lstrip("json").strip()
+        improved = json.loads(text)
+        logger.info(f"design_agent.improve_question question_id={question.get('id')}")
         return improved
 
     async def generate_variants(
@@ -298,7 +266,15 @@ Improvements to apply:
         num_variants: int = 2,
     ) -> GenerateVariantsResult:
         """Generate A/B test variants with predicted completion rates."""
-        prompt = f"""Create {num_variants} A/B test variants of this survey.
+        response = await client.messages.create(
+            model=settings.ANTHROPIC_MODEL,
+            max_tokens=4096,
+            system=self.SYSTEM_PROMPT,
+            tools=[GENERATE_VARIANTS_TOOL],
+            tool_choice={"type": "tool", "name": "generate_variants_result"},
+            messages=[{
+                "role": "user",
+                "content": f"""Create {num_variants} A/B test variants of this survey.
 
 Survey: {title}
 Original Questions:
@@ -309,43 +285,36 @@ Variant strategy:
 - Variant B: Reorder to most engaging questions first, trim to shortest viable set
 - Each variant must have its own hypothesis and predicted completion rate
 
-Use generate_variants_result function."""
-
-        response = await client.chat.completions.create(
-            model=settings.OPENAI_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            tools=[GENERATE_VARIANTS_TOOL],
-            tool_choice={"type": "function", "function": {"name": "generate_variants_result"}},
-            temperature=0.4,
+Use the generate_variants_result tool.""",
+            }],
         )
 
-        tool_call = response.choices[0].message.tool_calls[0]
-        data = json.loads(tool_call.function.arguments)
-        logger.info("design_agent.generate_variants", title=title, num_variants=num_variants)
+        tool_use = next(b for b in response.content if b.type == "tool_use")
+        data = tool_use.input
+        logger.info(f"design_agent.generate_variants title={title} num_variants={num_variants}")
         return GenerateVariantsResult(**data)
 
     async def suggest_question_types(self, survey_goal: str) -> list[dict]:
         """Given a survey goal, suggest the best question structure."""
-        prompt = f"""A healthcare admin wants to run a survey with this goal:
+        response = await client.messages.create(
+            model=settings.ANTHROPIC_MODEL,
+            max_tokens=2048,
+            system=self.SYSTEM_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"""A healthcare admin wants to run a survey with this goal:
 "{survey_goal}"
 
 Suggest 5-8 questions with ideal question types, options (if MCQ/Likert), and a brief rationale.
-Return JSON: {{"questions": [...]}} where each item has: text, type, options, rationale"""
-
-        response = await client.chat.completions.create(
-            model=settings.OPENAI_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.5,
+Return ONLY a JSON object in this exact format (no markdown fences):
+{{"questions": [{{"text": "...", "type": "...", "options": [...], "rationale": "..."}}]}}""",
+            }],
         )
 
-        data = json.loads(response.choices[0].message.content)
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1].lstrip("json").strip()
+        data = json.loads(text)
         return data.get("questions", [])
 
 
