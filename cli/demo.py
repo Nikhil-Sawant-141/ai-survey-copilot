@@ -237,7 +237,7 @@ async def _demo_design_agent() -> None:
                 + "[bold]Key Differences:[/bold]\n"
                 + "\n".join(f"  • {d}" for d in v.key_differences)
                 + f"\n\n[bold]Questions ({len(v.questions)}):[/bold]\n"
-                + "\n".join(f"  {i}. {q.get('text', '')}" for i, q in enumerate(v.questions, 1)),
+                + "\n".join(f"  {i}. {q.text}" for i, q in enumerate(v.questions)),
                 style="blue" if v.variant_label == "A" else "magenta",
             )
 
