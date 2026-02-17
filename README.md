@@ -287,12 +287,7 @@ so there is no manual setup required. Region must be set to a valid value
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `RateLimitError 429 OpenAI` | OpenAI still referenced somewhere | Run `grep -rn "openai" app/` and replace with Anthropic |
 | `NotFoundException: survey-guidelines` | Pinecone index not created yet | Ensure `ensure_indexes()` runs at startup before any queries |
-| `InvalidRequestError: metadata reserved` | SQLAlchemy column named `metadata` | Rename to `survey_metadata` with `Column("metadata", JSON)` |
-| `AttributeError: PrintLogger has no .name` | Custom logger passed to third-party lib | Replace `get_logger(__name__)` with `logging.getLogger(__name__)` |
-| `NotFoundException: region us-east-1-aws` | Invalid Pinecone region format | Use `us-east-1` not `us-east-1-aws` in `.env` |
 | `ConnectionRefusedError: localhost:6379` | Redis not running | `sudo systemctl start redis` |
 | `ConnectionRefusedError: localhost:5432` | PostgreSQL not running | `sudo systemctl start postgresql` |
 | `NotFoundError: model claude-3-5-sonnet` | Deprecated model name | Use `claude-sonnet-4-5-20250929` |
-| `AttributeError: Question has no .get` | Pydantic model treated as dict | Use `q.text` not `q.get('text')` |
