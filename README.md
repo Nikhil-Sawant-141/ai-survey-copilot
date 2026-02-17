@@ -20,8 +20,8 @@ quality (admin side) and completion rates (doctor side).
 └───────────────────────┴──────────────────────────────────────┘
                         │
 ┌───────────────────────▼──────────────────────────────────────┐
-│   OpenAI GPT-4o  |  Pinecone  |  PostgreSQL  |  Redis        │
-│   LLM + Tools    |  RAG       |  Storage     |  Cache/Queue  │
+│   Claude Sonnet  |  Pinecone  |  PostgreSQL  |  Redis        │
+│   LLM + Tools   |  RAG       |  Storage     |  Cache/Queue  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -42,7 +42,7 @@ survey_agent/
 │   │   ├── insight_agent.py     # Async: themes, sentiment, action items
 │   │   └── orchestrator.py      # Routes tasks, enforces rate limits
 │   ├── rag/
-│   │   ├── embeddings.py        # OpenAI text-embedding-3-small
+│   │   ├── embeddings.py        # Local sentence-transformers (all-MiniLM-L6-v2)
 │   │   ├── pinecone_client.py   # Vector store operations
 │   │   └── knowledge_base.py   # Seed guidelines + retrieve for prompts
 │   ├── routers/
@@ -56,7 +56,7 @@ survey_agent/
 │   ├── safety/
 │   │   └── moderator.py         # PHI detection, medical advice blocking
 │   └── utils/
-│       └── logger.py            # Structured logging (structlog)
+│       └── logger.py            # Logging
 ├── cli/
 │   └── demo.py                  # Interactive CLI demo (no server needed)
 ├── alembic/                     # DB migrations
@@ -72,12 +72,11 @@ survey_agent/
 
 ```bash
 # 1. Install dependencies
-pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 
 # 2. Configure
 cp .env.example .env
-# Add OPENAI_API_KEY to .env
+# Add ANTHROPIC_API_KEY and PINECONE_API_KEY to .env
 
 # 3. Run full demo
 python -m cli.demo full
@@ -85,7 +84,8 @@ python -m cli.demo full
 # Or individual agents:
 python -m cli.demo design       # Design Agent: bias check + variants
 python -m cli.demo attempt      # Attempt Agent: clarification + progress
-python -m cli.demo insights     # Insight Agent: theme + recommendations
+python -m cli.demo insights     # Insight Agent: themes + recommendations
+python -m cli.demo quality      # Quick bias check on sample survey
 ```
 
 ### Option B: Full Stack with Docker
@@ -93,7 +93,7 @@ python -m cli.demo insights     # Insight Agent: theme + recommendations
 ```bash
 # 1. Configure
 cp .env.example .env
-# Add OPENAI_API_KEY, PINECONE_API_KEY to .env
+# Add ANTHROPIC_API_KEY, PINECONE_API_KEY to .env
 
 # 2. Start everything
 docker-compose up
@@ -111,8 +111,25 @@ docker-compose exec api alembic upgrade head
 ```bash
 # Prerequisites: PostgreSQL + Redis running locally
 
+# Install PostgreSQL
+sudo apt install postgresql postgresql-contrib -y
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Create database
+sudo -u postgres psql -c "CREATE USER survey_user WITH PASSWORD 'survey_pass';"
+sudo -u postgres psql -c "CREATE DATABASE survey_db OWNER survey_user;"
+
+# Install Redis
+sudo apt install redis-server -y
+sudo systemctl start redis
+sudo systemctl enable redis
+
+# Install Python dependencies
 pip install -r requirements.txt
-cp .env.example .env        # Edit with your keys + local DB URL
+
+# Configure
+cp .env.example .env   # Edit with your keys + local DB URL
 
 # Run migrations
 alembic upgrade head
@@ -126,6 +143,24 @@ celery -A app.tasks.celery_app worker --loglevel=info -Q insights,reminders
 # Start Celery Beat for scheduled tasks (separate terminal)
 celery -A app.tasks.celery_app beat --loglevel=info
 ```
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | ✅ | Anthropic API key (Claude Sonnet) |
+| `ANTHROPIC_MODEL` | ✅ | Model string — `claude-sonnet-4-5-20250929` |
+| `PINECONE_API_KEY` | ✅ | Pinecone API key (vector store) |
+| `PINECONE_ENVIRONMENT` | ✅ | Pinecone region e.g. `us-east-1` |
+| `PINECONE_INDEX_GUIDELINES` | ✅ | Index name e.g. `survey-guidelines` |
+| `PINECONE_INDEX_TEMPLATES` | ✅ | Index name e.g. `survey-templates` |
+| `DATABASE_URL` | ⚠️ Server only | Async PostgreSQL URL |
+| `DATABASE_URL_SYNC` | ⚠️ Server only | Sync PostgreSQL URL (Alembic) |
+| `REDIS_URL` | ⚠️ Server only | Redis URL (sessions + cache) |
+| `SECRET_KEY` | ⚠️ Server only | JWT signing secret |
+
+> **Note:** `DATABASE_URL` and `REDIS_URL` are only required when running the
+> full API server. The CLI demo (`python -m cli.demo`) runs without them.
 
 ## API Reference
 
@@ -152,7 +187,7 @@ DELETE /surveys/{id}         # Delete draft
 POST /agents/quality-check          # Bias detection + quality score
 POST /agents/improve-question       # Improve a single question
 POST /agents/generate-variants      # Generate A/B test variants
-POST /agents/suggest-questions      # Suggest questions from goal
+POST /agents/suggest-questions      # Suggest questions from survey goal
 ```
 
 ### Doctor: Survey Taking
@@ -184,7 +219,7 @@ POST /agents/quality-check
   "survey_id": "uuid-optional"
 }
 ```
-Returns: quality score, bias flags with fixes, completion rate prediction, timing.
+Returns: quality score (0-10), bias flags with fixes, predicted completion rate, estimated time.
 
 ### Attempt Agent (`/agents/clarify`)
 ```json
@@ -197,45 +232,67 @@ POST /agents/clarify
 }
 ```
 Returns: plain-English clarification with examples. Never changes question meaning.
+Responses are cached in Redis for 24h — same question asked by 100 doctors = 1 API call.
 
 ### Insight Agent (async, via Celery)
 Triggered automatically when survey closes. Also available via:
 ```http
 POST /insights/{survey_id}/trigger
 ```
-Returns: themes, sentiment, executive summary, prioritized action items.
+Returns: themes, sentiment breakdown, executive summary, prioritized action items.
 
 ## Safety & Compliance
 
-- **PHI Prevention**: Questions scanned for 15+ PHI keyword/regex patterns before saving
+- **PHI Prevention**: Questions scanned for PHI keyword/regex patterns before saving
 - **Response Sanitization**: Open-text answers automatically redact SSNs, phones, emails
-- **Medical Advice Blocking**: Agent outputs checked with 7 regex patterns before returning
+- **Medical Advice Blocking**: All agent outputs checked before returning to users
 - **Audit Logging**: Every agent call logged with input context, output summary, latency
 - **Rate Limiting**: Per-user limits via Redis (10 clarifications/survey, 100 suggestions/hour)
 - **HIPAA Notes**: No patient data collected. All responses anonymized at rest.
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | OpenAI API key (GPT-4o + embeddings) |
-| `PINECONE_API_KEY` | Pinecone API key (vector store) |
-| `DATABASE_URL` | Async PostgreSQL URL |
-| `REDIS_URL` | Redis URL (sessions + cache) |
-| `SECRET_KEY` | JWT signing secret |
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
 | API Framework | FastAPI + Uvicorn |
-| LLM | OpenAI GPT-4o (function calling) |
-| Embeddings | text-embedding-3-small |
-| Vector Store | Pinecone (RAG) |
+| LLM | Anthropic Claude Sonnet (`claude-sonnet-4-5-20250929`) |
+| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` — runs locally, no API key |
+| Vector Store | Pinecone serverless (RAG) — 384-dim cosine index |
 | Database | PostgreSQL + SQLAlchemy async |
-| Cache/Sessions | Redis |
-| Task Queue | Celery + Redis Broker |
+| Cache / Sessions | Redis |
+| Task Queue | Celery + Redis broker |
 | Migrations | Alembic |
-| Safety | Custom moderator + Presidio-ready |
-| Logging | structlog |
+| Safety | Custom PHI moderator |
 | CLI | Typer + Rich |
+
+## Key Design Decisions
+
+**Why Anthropic Claude instead of OpenAI GPT-4o?**
+Claude is used for all LLM calls because it has stronger built-in safety for
+medical contexts (refuses medical advice by default), better structured output
+reliability for complex tool schemas, and a 200k token context window suited
+to the Insight Agent's large response sets.
+
+**Why local embeddings instead of OpenAI embeddings?**
+`sentence-transformers/all-MiniLM-L6-v2` runs entirely on-device with no API
+calls, no quota limits, and no cost. At 384 dimensions it is fast and accurate
+enough for survey template and guideline similarity search.
+
+**Why Pinecone serverless?**
+Indexes are created automatically at startup (`ensure_indexes()` in lifespan)
+so there is no manual setup required. Region must be set to a valid value
+(e.g. `us-east-1`) in `.env` — do not include a cloud suffix like `-aws`.
+
+## Common Issues
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `RateLimitError 429 OpenAI` | OpenAI still referenced somewhere | Run `grep -rn "openai" app/` and replace with Anthropic |
+| `NotFoundException: survey-guidelines` | Pinecone index not created yet | Ensure `ensure_indexes()` runs at startup before any queries |
+| `InvalidRequestError: metadata reserved` | SQLAlchemy column named `metadata` | Rename to `survey_metadata` with `Column("metadata", JSON)` |
+| `AttributeError: PrintLogger has no .name` | Custom logger passed to third-party lib | Replace `get_logger(__name__)` with `logging.getLogger(__name__)` |
+| `NotFoundException: region us-east-1-aws` | Invalid Pinecone region format | Use `us-east-1` not `us-east-1-aws` in `.env` |
+| `ConnectionRefusedError: localhost:6379` | Redis not running | `sudo systemctl start redis` |
+| `ConnectionRefusedError: localhost:5432` | PostgreSQL not running | `sudo systemctl start postgresql` |
+| `NotFoundError: model claude-3-5-sonnet` | Deprecated model name | Use `claude-sonnet-4-5-20250929` |
+| `AttributeError: Question has no .get` | Pydantic model treated as dict | Use `q.text` not `q.get('text')` |
