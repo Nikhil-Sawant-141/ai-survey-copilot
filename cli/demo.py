@@ -430,16 +430,11 @@ def full():
     console.print()
 
     async def _run_all():
-        try:
-            await _demo_design_agent()
-            console.print("\n" + "─" * 60 + "\n")
-            await _demo_attempt_agent()
-            console.print("\n" + "─" * 60 + "\n")
-            await _demo_insight_agent()
-        finally:
-            # Cleanly close Redis before event loop shuts down
-            from app.redis_client import close_redis
-            await close_redis()
+        await _demo_design_agent()
+        console.print("\n" + "─" * 60 + "\n")
+        await _demo_attempt_agent()
+        console.print("\n" + "─" * 60 + "\n")
+        await _demo_insight_agent()
 
 
     asyncio.run(_run_all())
